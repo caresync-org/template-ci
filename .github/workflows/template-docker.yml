@@ -1,8 +1,7 @@
 # =============================================================================
 # CareSync — Reusable Template: Docker Build + Trivy Scan + Docker Push
 # Called directly by each microservice workflow  (Job 3)
-# Outputs  : image_tag, full_image, is_pr
-# =============================================================================
+
 name: "CareSync Template — Docker Build, Trivy & Push"
 
 on:
