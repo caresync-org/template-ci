@@ -1,0 +1,144 @@
+# =============================================================================
+# CareSync — Reusable Template: npm Install + Snyk Security Scan
+# File    : template-build-snyk.yml
+# Called  : directly from each microservice workflow (Job 2)
+# =============================================================================
+name: "CareSync Template — Install & Snyk Scan"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      service_path:
+        required: false
+        type: string
+        default: "."
+      node_version:
+        required: false
+        type: string
+        default: "20"
+    secrets:
+      SNYK_TOKEN:
+        required: true
+      SMTP_USERNAME:
+        required: false
+      SMTP_PASSWORD:
+        required: false
+      ALERT_EMAIL:
+        required: false
+
+jobs:
+  # ── Step A: Install ────────────────────────────────────────────────────────
+  install:
+    name: "📦 Install Dependencies"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.service_path }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ inputs.node_version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: "npm"
+          cache-dependency-path: "${{ inputs.service_path }}/package-lock.json"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Verify packages
+        run: |
+          echo "✅ Node $(node -v) | npm $(npm -v)"
+          echo "📦 Packages: $(ls node_modules | wc -l)"
+
+      - name: "📧 Notify — Install Failure"
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: "CareSync CI <${{ secrets.SMTP_USERNAME }}>"
+          subject: "❌ FAILED | caresync-${{ inputs.service_name }} | Install | ${{ github.ref_name }}"
+          body: |
+            ❌ Pipeline FAILED at: Install Dependencies
+
+            Service : caresync-${{ inputs.service_name }}
+            Branch  : ${{ github.ref_name }}
+            Commit  : ${{ github.sha }}
+            Author  : ${{ github.actor }}
+            Run     : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # ── Step B: Snyk ──────────────────────────────────────────────────────────
+  snyk:
+    name: "🛡️ Snyk Security Scan"
+    runs-on: ubuntu-latest
+    needs: install
+    permissions:
+      security-events: write     # 👈 ADDED
+      contents: read             # 👈 ADDED
+    defaults:
+      run:
+        working-directory: ${{ inputs.service_path }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ inputs.node_version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: "npm"
+          cache-dependency-path: "${{ inputs.service_path }}/package-lock.json"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run Snyk dependency scan
+        uses: snyk/actions/node@master
+        with:
+          args: >
+            --severity-threshold=critical
+            --fail-on=all
+            --project-name=caresync-${{ inputs.service_name }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload Snyk SARIF
+        uses: github/codeql-action/upload-sarif@v4    # 👈 FIXED v3→v4
+        if: always()
+        with:
+          sarif_file: snyk.sarif
+        continue-on-error: true
+
+      - name: "📧 Notify — Snyk Failure"
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: "CareSync CI <${{ secrets.SMTP_USERNAME }}>"
+          subject: "❌ FAILED | caresync-${{ inputs.service_name }} | Snyk | ${{ github.ref_name }}"
+          body: |
+            ❌ Pipeline FAILED at: Snyk Security Scan
+            CRITICAL vulnerabilities found in dependencies.
+
+            Service : caresync-${{ inputs.service_name }}
+            Branch  : ${{ github.ref_name }}
+            Commit  : ${{ github.sha }}
+            Author  : ${{ github.actor }}
+            Run     : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
