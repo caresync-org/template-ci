@@ -1,6 +1,7 @@
 # =============================================================================
 # CareSync — Reusable Template: SonarQube Analysis
-# Called directly by each microservice workflow  (Job 1)
+# File    : template-sonarqube.yml
+# Called  : directly from each microservice workflow (Job 1)
 # =============================================================================
 name: "CareSync Template — SonarQube Analysis"
 
@@ -73,6 +74,8 @@ jobs:
       - name: SonarQube Quality Gate
         uses: SonarSource/sonarqube-quality-gate-action@v1
         timeout-minutes: 5
+        with:
+          scanMetadataReportFile: .scannerwork/report-task.txt   # 👈 ADDED
         env:
           SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONARQUBE_URL }}

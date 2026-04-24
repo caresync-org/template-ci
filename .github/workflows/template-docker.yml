@@ -1,7 +1,9 @@
 # =============================================================================
 # CareSync — Reusable Template: Docker Build + Trivy Scan + Docker Push
-# Called directly by each microservice workflow  (Job 3)
-
+# File    : template-docker.yml
+# Called  : directly from each microservice workflow (Job 3)
+# Outputs : image_tag, full_image, is_pr
+# =============================================================================
 name: "CareSync Template — Docker Build, Trivy & Push"
 
 on:
@@ -21,7 +23,6 @@ on:
         required: false
         type: string
         default: "20"
-
     secrets:
       DOCKERHUB_USERNAME:
         required: true
@@ -35,7 +36,6 @@ on:
         required: false
       ALERT_EMAIL:
         required: false
-
     outputs:
       image_tag:
         description: "Computed Docker image tag"
@@ -44,14 +44,17 @@ on:
         description: "Full image reference (registry/name:tag)"
         value: ${{ jobs.docker-build.outputs.full_image }}
       is_pr:
-        description: "true if triggered by a pull_request event"
+        description: "'true' if triggered by a pull_request event"
         value: ${{ jobs.docker-build.outputs.is_pr }}
 
 jobs:
-  # ── Step 1: Docker Build ──────────────────────────────────────────────────
+  # ── Step A: Docker Build ───────────────────────────────────────────────────
   docker-build:
     name: "🐳 Docker Build"
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
     outputs:
       image_tag:  ${{ steps.meta.outputs.image_tag }}
       full_image: ${{ steps.meta.outputs.full_image }}
@@ -112,9 +115,8 @@ jobs:
       - name: Save image as tar.gz
         run: |
           docker save "${{ steps.meta.outputs.full_image }}" | gzip > /tmp/image.tar.gz
-          echo "${{ steps.meta.outputs.full_image }}" > /tmp/image-name.txt
+          echo "${{ steps.meta.outputs.full_image }}" > /tmp/image-name.txt   # 👈 ADDED
           echo "✅ Saved: $(du -sh /tmp/image.tar.gz | cut -f1)"
-          echo "✅ Image name saved: $(cat /tmp/image-name.txt)"
 
       - name: Upload image artifact
         uses: actions/upload-artifact@v4
@@ -122,7 +124,7 @@ jobs:
           name: docker-image-${{ inputs.service_name }}
           path: |
             /tmp/image.tar.gz
-            /tmp/image-name.txt
+            /tmp/image-name.txt                                                # 👈 ADDED
           retention-days: 1
 
       - name: "📧 Notify — Docker Build Failure"
@@ -146,7 +148,7 @@ jobs:
             Author  : ${{ github.actor }}
             Run     : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-  # ── Step 2: Trivy Container Scan ─────────────────────────────────────────
+  # ── Step B: Trivy Container Scan ──────────────────────────────────────────
   trivy:
     name: "🔒 Trivy Container Scan"
     runs-on: ubuntu-latest
@@ -165,7 +167,7 @@ jobs:
       - name: Load Docker image
         run: docker load < /tmp/image.tar.gz
 
-      - name: Read image name
+      - name: Read image name                                                  # 👈 ADDED
         id: image
         run: |
           IMAGE=$(cat /tmp/image-name.txt)
@@ -175,17 +177,17 @@ jobs:
       - name: Trivy scan — SARIF output
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ steps.image.outputs.full_image }}
+          image-ref: ${{ steps.image.outputs.full_image }}                     # 👈 FIXED
           format: "sarif"
           output: "trivy-results.sarif"
           severity: "CRITICAL,HIGH"
-          exit-code: "0"
+          exit-code: "0"                                                       # 👈 FIXED
           ignore-unfixed: true
           vuln-type: "os,library"
           timeout: "10m"
 
       - name: Upload Trivy SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v4                            # 👈 FIXED v3→v4
         if: always()
         with:
           sarif_file: "trivy-results.sarif"
@@ -194,7 +196,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         if: always()
         with:
-          image-ref: ${{ steps.image.outputs.full_image }}
+          image-ref: ${{ steps.image.outputs.full_image }}                     # 👈 FIXED
           format: "table"
           severity: "CRITICAL,HIGH,MEDIUM"
           ignore-unfixed: true
@@ -214,7 +216,6 @@ jobs:
           subject: "❌ FAILED | caresync-${{ inputs.service_name }} | Trivy Scan | ${{ github.ref_name }}"
           body: |
             ❌ Pipeline FAILED at: Trivy Container Scan
-            CRITICAL vulnerabilities found in the Docker image.
 
             Service : caresync-${{ inputs.service_name }}
             Branch  : ${{ github.ref_name }}
@@ -222,7 +223,7 @@ jobs:
             Author  : ${{ github.actor }}
             Run     : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-  # ── Step 3: Push to Docker Hub (skipped for PRs) ─────────────────────────
+  # ── Step C: Push to Docker Hub (skipped for PRs) ──────────────────────────
   docker-push:
     name: "🚀 Push to Docker Hub"
     runs-on: ubuntu-latest
@@ -239,7 +240,7 @@ jobs:
       - name: Load Docker image
         run: docker load < /tmp/image.tar.gz
 
-      - name: Read image name
+      - name: Read image name                                                  # 👈 ADDED
         id: image
         run: |
           IMAGE=$(cat /tmp/image-name.txt)
@@ -254,14 +255,14 @@ jobs:
 
       - name: Push versioned image tag
         run: |
-          docker push "${{ steps.image.outputs.full_image }}"
+          docker push "${{ steps.image.outputs.full_image }}"                  # 👈 FIXED
           echo "✅ Pushed: ${{ steps.image.outputs.full_image }}"
 
       - name: Push 'latest' tag (production only)
         if: github.ref_name == 'production'
         run: |
           LATEST="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}:latest"
-          docker tag "${{ steps.image.outputs.full_image }}" "$LATEST"
+          docker tag "${{ steps.image.outputs.full_image }}" "$LATEST"         # 👈 FIXED
           docker push "$LATEST"
           echo "✅ Pushed: $LATEST"
 

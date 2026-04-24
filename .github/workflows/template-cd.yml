@@ -1,8 +1,7 @@
 # =============================================================================
 # CareSync — Reusable Template: CD — Update ArgoCD Manifest Repo
-# Called directly by each microservice workflow  (Job 5)
-# Clones argocd-manifests, updates image tag in values.yaml, commits + pushes.
-# ArgoCD auto-syncs the change to Kubernetes.
+# File    : template-cd.yml
+# Called  : directly from each microservice workflow (Job 5)
 # =============================================================================
 name: "CareSync Template — CD (ArgoCD GitOps)"
 
@@ -24,7 +23,7 @@ on:
       manifest_repo:
         required: false
         type: string
-        default: "caresync-org/argoCD-manifests"     # 👈 FIXED capital CD
+        default: "caresync-org/argoCD-manifests"
       manifest_values_path:
         required: false
         type: string
@@ -32,8 +31,7 @@ on:
       manifest_branch:
         required: false
         type: string
-        default: "dev"                               # 👈 ADDED new input
-
+        default: "dev"                          # 👈 ADDED
     secrets:
       MANIFEST_REPO_PAT:
         required: true
@@ -79,12 +77,12 @@ jobs:
           NEW_TAG="${{ inputs.image_tag }}"
 
           echo "📄 Before:"
-          yq e "${VALUES_KEY}" "$VALUES_FILE"
+          yq e "${VALUES_KEY}" "${VALUES_FILE}"
 
-          yq e -i "${VALUES_KEY} = \"${NEW_TAG}\"" "$VALUES_FILE"
+          yq e -i "${VALUES_KEY} = \"${NEW_TAG}\"" "${VALUES_FILE}"
 
           echo "📄 After:"
-          yq e "${VALUES_KEY}" "$VALUES_FILE"
+          yq e "${VALUES_KEY}" "${VALUES_FILE}"
 
       - name: Commit and push manifest changes
         run: |
@@ -92,12 +90,12 @@ jobs:
           git add "${{ inputs.manifest_values_path }}"
 
           git diff --cached --quiet && {
-            echo "ℹ️  No changes detected — tag already up to date."
+            echo "ℹ️  No changes — tag already up to date."
             exit 0
           }
 
           git commit -m "chore(deploy): update caresync-${{ inputs.service_name }} → ${{ inputs.image_tag }} [ci skip]"
-          git push origin HEAD:${{ inputs.manifest_branch }}    # 👈 FIXED push to dev
+          git push origin HEAD:${{ inputs.manifest_branch }}    # 👈 FIXED
           echo "✅ Manifest updated — ArgoCD will auto-sync."
 
       - name: Deployment summary
@@ -109,7 +107,7 @@ jobs:
           echo "  Branch  : ${{ github.ref_name }}"
           echo "  Repo    : ${{ inputs.manifest_repo }}"
           echo "  File    : ${{ inputs.manifest_values_path }}"
-          echo "  Branch  : ${{ inputs.manifest_branch }}"
+          echo "  ManifestBranch : ${{ inputs.manifest_branch }}"
           echo "═══════════════════════════════════════════════════"
 
       - name: "📧 Notify — CD Failure"
