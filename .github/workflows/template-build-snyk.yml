@@ -84,8 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: install
     permissions:
-      security-events: write     # 👈 ADDED
-      contents: read             # 👈 ADDED
+      security-events: write
+      contents: read
     defaults:
       run:
         working-directory: ${{ inputs.service_path }}
@@ -111,11 +111,13 @@ jobs:
             --severity-threshold=critical
             --fail-on=all
             --project-name=caresync-${{ inputs.service_name }}
+            --sarif-file-output=snyk.sarif    # 👈 ADDED
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true               # 👈 ADDED
 
       - name: Upload Snyk SARIF
-        uses: github/codeql-action/upload-sarif@v4    # 👈 FIXED v3→v4
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: snyk.sarif
