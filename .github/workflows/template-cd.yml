@@ -24,11 +24,15 @@ on:
       manifest_repo:
         required: false
         type: string
-        default: "caresync-org/argocd-manifests"
+        default: "caresync-org/argoCD-manifests"     # 👈 FIXED capital CD
       manifest_values_path:
         required: false
         type: string
         default: "values.yaml"
+      manifest_branch:
+        required: false
+        type: string
+        default: "dev"                               # 👈 ADDED new input
 
     secrets:
       MANIFEST_REPO_PAT:
@@ -49,9 +53,10 @@ jobs:
       - name: Clone ArgoCD manifest repository
         run: |
           git clone \
+            --branch ${{ inputs.manifest_branch }} \
             "https://x-access-token:${{ secrets.MANIFEST_REPO_PAT }}@github.com/${{ inputs.manifest_repo }}.git" \
             manifest-repo
-          echo "✅ Cloned: ${{ inputs.manifest_repo }}"
+          echo "✅ Cloned: ${{ inputs.manifest_repo }} (branch: ${{ inputs.manifest_branch }})"
 
       - name: Configure Git identity
         run: |
@@ -92,7 +97,7 @@ jobs:
           }
 
           git commit -m "chore(deploy): update caresync-${{ inputs.service_name }} → ${{ inputs.image_tag }} [ci skip]"
-          git push origin HEAD
+          git push origin HEAD:${{ inputs.manifest_branch }}    # 👈 FIXED push to dev
           echo "✅ Manifest updated — ArgoCD will auto-sync."
 
       - name: Deployment summary
@@ -104,6 +109,7 @@ jobs:
           echo "  Branch  : ${{ github.ref_name }}"
           echo "  Repo    : ${{ inputs.manifest_repo }}"
           echo "  File    : ${{ inputs.manifest_values_path }}"
+          echo "  Branch  : ${{ inputs.manifest_branch }}"
           echo "═══════════════════════════════════════════════════"
 
       - name: "📧 Notify — CD Failure"
