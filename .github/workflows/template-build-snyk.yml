@@ -111,12 +111,20 @@ jobs:
             --severity-threshold=critical
             --fail-on=all
             --project-name=caresync-${{ inputs.service_name }}
-            --sarif-file-output=snyk.sarif    # 👈 ADDED
+            --sarif-file-output=snyk.sarif
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        continue-on-error: true               # 👈 ADDED
+        continue-on-error: true
 
-      - name: Upload Snyk SARIF
+      - name: Upload Snyk report as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-report-${{ inputs.service_name }}
+          path: snyk.sarif
+          retention-days: 7
+
+      - name: Upload Snyk SARIF to Security tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
