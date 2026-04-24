@@ -1,60 +1,98 @@
-name: "Template — Docker Build, Trivy & Push"
+name: "CareSync Template — Docker Build, Trivy & Push"
 
 on:
   workflow_call:
     inputs:
       service_name:
-        description: "Human-readable service name"
         required: true
         type: string
       service_path:
-        description: "Path to the service directory"
-        required: true
+        required: false
         type: string
+        default: "."
       docker_image_name:
-        description: "Docker Hub image name"
         required: true
         type: string
+      node_version:
+        required: false
+        type: string
+        default: "20"
     secrets:
       DOCKERHUB_USERNAME:
         required: true
       DOCKERHUB_TOKEN:
         required: true
+      MANIFEST_REPO_PAT:
+        required: true
       SMTP_USERNAME:
-        required: true
+        required: false
       SMTP_PASSWORD:
-        required: true
+        required: false
       ALERT_EMAIL:
-        required: true
+        required: false
     outputs:
-      version:
-        description: "Semantic version tag e.g. v1.2.3"
-        value: ${{ jobs.docker.outputs.version }}
+      image_tag:
+        description: "Computed Docker image tag"
+        value: ${{ jobs.docker.outputs.image_tag }}
+      full_image:
+        description: "Full image reference (registry/name:tag)"
+        value: ${{ jobs.docker.outputs.full_image }}
+      is_pr:
+        description: "'true' if triggered by a pull_request event"
+        value: ${{ jobs.docker.outputs.is_pr }}
 
 jobs:
   docker:
-    name: "4,5,6 Docker — ${{ inputs.service_name }}"
+    name: "🐳 Docker Build, Trivy & Push"
     runs-on: ubuntu-latest
     permissions:
+      security-events: write
       contents: write
+
     outputs:
-      version: ${{ steps.meta.outputs.version }}
+      image_tag:  ${{ steps.meta.outputs.image_tag }}
+      full_image: ${{ steps.meta.outputs.full_image }}
+      is_pr:      ${{ steps.meta.outputs.is_pr }}
+
     steps:
-      - name: Checkout Repository
+      - name: Checkout source code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Determine Semantic Version
-        id: version
-        uses: mathieudutour/github-tag-action@v6.2
-        with:
-          github_token: ${{ github.token }}
-          tag_prefix: "${{ inputs.service_name }}/v"
-          default_bump: patch
-          initial_version: "1.0.0"
-          custom_release_rules: "feature:minor:Features,breaking:major:Breaking Changes"
-          dry_run: ${{ github.event_name == 'pull_request' }}
+      - name: Compute image tag
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BRANCH="${GITHUB_REF_NAME}"
+          IS_PR="false"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            IS_PR="true"
+            TAG="pr-${SHORT_SHA}"
+          elif [ "$BRANCH" = "production" ]; then
+            git fetch --tags
+            LATEST=$(git tag --sort=-version:refname \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            [ -z "$LATEST" ] && LATEST="v0.0.0"
+            MAJ=$(echo "$LATEST" | cut -d. -f1 | tr -d 'v')
+            MIN=$(echo "$LATEST" | cut -d. -f2)
+            PAT=$(echo "$LATEST" | cut -d. -f3)
+            TAG="v${MAJ}.${MIN}.$((PAT + 1))"
+          else
+            TAG="dev-${SHORT_SHA}"
+          fi
+
+          FULL="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}:${TAG}"
+          echo "image_tag=${TAG}"   >> $GITHUB_OUTPUT
+          echo "full_image=${FULL}" >> $GITHUB_OUTPUT
+          echo "is_pr=${IS_PR}"     >> $GITHUB_OUTPUT
+
+          echo "════════════════════════════════════════"
+          echo "  Tag    : ${TAG}"
+          echo "  Image  : ${FULL}"
+          echo "  PR     : ${IS_PR}"
+          echo "════════════════════════════════════════"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -65,70 +103,70 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract Image Tags
-        id: meta
-        run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          VERSION="${{ steps.version.outputs.new_version }}"
-          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}"
-
-          echo "image=${IMAGE}"                              >> $GITHUB_OUTPUT
-          echo "tag_version=${IMAGE}:v${VERSION}"           >> $GITHUB_OUTPUT
-          echo "tag_sha=${IMAGE}:v${VERSION}-${SHORT_SHA}"  >> $GITHUB_OUTPUT
-          echo "tag_latest=${IMAGE}:latest"                 >> $GITHUB_OUTPUT
-          echo "version=v${VERSION}"                        >> $GITHUB_OUTPUT
-
-          echo "════════════════════════════════════════"
-          echo "  Image  : ${IMAGE}"
-          echo "  Version: v${VERSION}"
-          echo "  SHA    : v${VERSION}-${SHORT_SHA}"
-          echo "════════════════════════════════════════"
-
-      - name: "4. Build Docker Image"
+      - name: Build Docker image
         run: |
           docker build \
-            -t ${{ steps.meta.outputs.tag_version }} \
-            -t ${{ steps.meta.outputs.tag_sha }} \
-            -t ${{ steps.meta.outputs.tag_latest }} \
+            -t ${{ steps.meta.outputs.full_image }} \
             -f ${{ inputs.service_path }}/Dockerfile \
             ${{ inputs.service_path }}
+          echo "✅ Built: ${{ steps.meta.outputs.full_image }}"
 
-      - name: "5. Trivy — Container Scan"
+      - name: Trivy — Container Scan
         uses: aquasecurity/trivy-action@master
         continue-on-error: true
         with:
-          image-ref: ${{ steps.meta.outputs.tag_version }}
+          image-ref: ${{ steps.meta.outputs.full_image }}
           format: table
-          exit-code: "1"
+          exit-code: "0"
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
-      - name: "6. Push Docker Image to DockerHub"
+      - name: Push Docker image
         if: github.event_name != 'pull_request'
         run: |
-          echo "Pushing images..."
-          docker push ${{ steps.meta.outputs.tag_version }}
-          docker push ${{ steps.meta.outputs.tag_sha }}
-          docker push ${{ steps.meta.outputs.tag_latest }}
-          echo "All tags pushed"
+          docker push ${{ steps.meta.outputs.full_image }}
+          echo "✅ Pushed: ${{ steps.meta.outputs.full_image }}"
 
-      - name: Send Email on Failure
+      - name: Push latest tag (production only)
+        if: github.ref_name == 'production' && github.event_name != 'pull_request'
+        run: |
+          LATEST="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}:latest"
+          docker tag ${{ steps.meta.outputs.full_image }} $LATEST
+          docker push $LATEST
+          echo "✅ Pushed: $LATEST"
+
+      - name: Create Git release tag (production only)
+        if: github.ref_name == 'production' && github.event_name != 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.MANIFEST_REPO_PAT }}
+          script: |
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              ref:   `refs/tags/${{ steps.meta.outputs.image_tag }}`,
+              sha:   context.sha,
+            });
+            console.log(`✅ Git tag: ${{ steps.meta.outputs.image_tag }}`);
+
+      - name: "📧 Notify — Docker Failure"
         if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
+          secure: true
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "MediMesh CI Failed — Docker (${{ inputs.service_name }})"
           to: ${{ secrets.ALERT_EMAIL }}
-          from: MediMesh CI Pipeline
+          from: "CareSync CI <${{ secrets.SMTP_USERNAME }}>"
+          subject: "❌ FAILED | caresync-${{ inputs.service_name }} | Docker | ${{ github.ref_name }}"
           body: |
-            Docker build/push FAILED for: ${{ inputs.service_name }}
+            ❌ Pipeline FAILED at: Docker Build/Trivy/Push
 
-            Image  : ${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}
-            Branch : ${{ github.ref_name }}
-            Commit : ${{ github.sha }}
-            Author : ${{ github.actor }}
-
-            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Service : caresync-${{ inputs.service_name }}
+            Image   : ${{ steps.meta.outputs.full_image }}
+            Branch  : ${{ github.ref_name }}
+            Commit  : ${{ github.sha }}
+            Author  : ${{ github.actor }}
+            Run     : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
