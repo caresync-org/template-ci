@@ -1,0 +1,281 @@
+# =============================================================================
+# CareSync — Reusable Template: Docker Build + Trivy Scan + Docker Push
+# Called directly by each microservice workflow  (Job 3)
+# Outputs  : image_tag, full_image, is_pr
+# =============================================================================
+name: "CareSync Template — Docker Build, Trivy & Push"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      service_path:
+        required: false
+        type: string
+        default: "."
+      docker_image_name:
+        required: true
+        type: string
+      node_version:
+        required: false
+        type: string
+        default: "20"
+
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+      MANIFEST_REPO_PAT:
+        required: true
+      SMTP_USERNAME:
+        required: false
+      SMTP_PASSWORD:
+        required: false
+      ALERT_EMAIL:
+        required: false
+
+    outputs:
+      image_tag:
+        description: "Computed Docker image tag"
+        value: ${{ jobs.docker-build.outputs.image_tag }}
+      full_image:
+        description: "Full image reference (registry/name:tag)"
+        value: ${{ jobs.docker-build.outputs.full_image }}
+      is_pr:
+        description: "true if triggered by a pull_request event"
+        value: ${{ jobs.docker-build.outputs.is_pr }}
+
+jobs:
+  # ── Step 1: Docker Build ──────────────────────────────────────────────────
+  docker-build:
+    name: "🐳 Docker Build"
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag:  ${{ steps.meta.outputs.image_tag }}
+      full_image: ${{ steps.meta.outputs.full_image }}
+      is_pr:      ${{ steps.meta.outputs.is_pr }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BRANCH="${GITHUB_REF_NAME}"
+          IS_PR="false"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            IS_PR="true"
+            TAG="pr-${SHORT_SHA}"
+          elif [ "$BRANCH" = "production" ]; then
+            git fetch --tags
+            LATEST=$(git tag --sort=-version:refname \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            [ -z "$LATEST" ] && LATEST="v0.0.0"
+            MAJ=$(echo "$LATEST" | cut -d. -f1 | tr -d 'v')
+            MIN=$(echo "$LATEST" | cut -d. -f2)
+            PAT=$(echo "$LATEST" | cut -d. -f3)
+            TAG="v${MAJ}.${MIN}.$((PAT + 1))"
+          else
+            TAG="dev-${SHORT_SHA}"
+          fi
+
+          FULL="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}:${TAG}"
+          echo "image_tag=${TAG}"   >> $GITHUB_OUTPUT
+          echo "full_image=${FULL}" >> $GITHUB_OUTPUT
+          echo "is_pr=${IS_PR}"     >> $GITHUB_OUTPUT
+          echo "📌 Tag: ${TAG} | Image: ${FULL} | PR: ${IS_PR}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.service_path }}
+          file: ${{ inputs.service_path }}/Dockerfile
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.full_image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=caresync-${{ inputs.service_name }}
+
+      - name: Save image as tar.gz
+        run: |
+          docker save "${{ steps.meta.outputs.full_image }}" | gzip > /tmp/image.tar.gz
+          echo "✅ Saved: $(du -sh /tmp/image.tar.gz | cut -f1)"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ inputs.service_name }}
+          path: /tmp/image.tar.gz
+          retention-days: 1
+
+      - name: "📧 Notify — Docker Build Failure"
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: "CareSync CI <${{ secrets.SMTP_USERNAME }}>"
+          subject: "❌ FAILED | caresync-${{ inputs.service_name }} | Docker Build | ${{ github.ref_name }}"
+          body: |
+            ❌ Pipeline FAILED at: Docker Build
+
+            Service : caresync-${{ inputs.service_name }}
+            Branch  : ${{ github.ref_name }}
+            Commit  : ${{ github.sha }}
+            Author  : ${{ github.actor }}
+            Run     : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # ── Step 2: Trivy Container Scan ─────────────────────────────────────────
+  trivy:
+    name: "🔒 Trivy Container Scan"
+    runs-on: ubuntu-latest
+    needs: docker-build
+
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ inputs.service_name }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load < /tmp/image.tar.gz
+
+      - name: Trivy scan — SARIF output
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.docker-build.outputs.full_image }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          timeout: "10m"
+
+      - name: Upload Trivy SARIF to Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+
+      - name: Trivy table summary
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: ${{ needs.docker-build.outputs.full_image }}
+          format: "table"
+          severity: "CRITICAL,HIGH,MEDIUM"
+          ignore-unfixed: true
+          exit-code: "0"
+
+      - name: "📧 Notify — Trivy Failure"
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: "CareSync CI <${{ secrets.SMTP_USERNAME }}>"
+          subject: "❌ FAILED | caresync-${{ inputs.service_name }} | Trivy Scan | ${{ github.ref_name }}"
+          body: |
+            ❌ Pipeline FAILED at: Trivy Container Scan
+            CRITICAL vulnerabilities found in the Docker image.
+
+            Service : caresync-${{ inputs.service_name }}
+            Branch  : ${{ github.ref_name }}
+            Commit  : ${{ github.sha }}
+            Author  : ${{ github.actor }}
+            Run     : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # ── Step 3: Push to Docker Hub (skipped for PRs) ─────────────────────────
+  docker-push:
+    name: "🚀 Push to Docker Hub"
+    runs-on: ubuntu-latest
+    needs: [docker-build, trivy]
+    if: needs.docker-build.outputs.is_pr == 'false'
+
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ inputs.service_name }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load < /tmp/image.tar.gz
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push versioned image tag
+        run: |
+          docker push "${{ needs.docker-build.outputs.full_image }}"
+          echo "✅ Pushed: ${{ needs.docker-build.outputs.full_image }}"
+
+      - name: Push 'latest' tag (production only)
+        if: github.ref_name == 'production'
+        run: |
+          LATEST="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.docker_image_name }}:latest"
+          docker tag "${{ needs.docker-build.outputs.full_image }}" "$LATEST"
+          docker push "$LATEST"
+          echo "✅ Pushed: $LATEST"
+
+      - name: Create Git release tag (production only)
+        if: github.ref_name == 'production'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.MANIFEST_REPO_PAT }}
+          script: |
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              ref:   `refs/tags/${{ needs.docker-build.outputs.image_tag }}`,
+              sha:   context.sha,
+            });
+            console.log(`✅ Git tag: ${{ needs.docker-build.outputs.image_tag }}`);
+
+      - name: "📧 Notify — Docker Push Failure"
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: "CareSync CI <${{ secrets.SMTP_USERNAME }}>"
+          subject: "❌ FAILED | caresync-${{ inputs.service_name }} | Docker Push | ${{ github.ref_name }}"
+          body: |
+            ❌ Pipeline FAILED at: Docker Push
+
+            Service : caresync-${{ inputs.service_name }}
+            Branch  : ${{ github.ref_name }}
+            Commit  : ${{ github.sha }}
+            Author  : ${{ github.actor }}
+            Run     : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

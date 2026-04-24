@@ -1,0 +1,129 @@
+# =============================================================================
+# CareSync — Reusable Template: CD — Update ArgoCD Manifest Repo
+# Called directly by each microservice workflow  (Job 5)
+# Clones argocd-manifests, updates image tag in values.yaml, commits + pushes.
+# ArgoCD auto-syncs the change to Kubernetes.
+# =============================================================================
+name: "CareSync Template — CD (ArgoCD GitOps)"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+      full_image:
+        required: true
+        type: string
+      values_key:
+        required: true
+        type: string
+      manifest_repo:
+        required: false
+        type: string
+        default: "caresync-org/argocd-manifests"
+      manifest_values_path:
+        required: false
+        type: string
+        default: "values.yaml"
+
+    secrets:
+      MANIFEST_REPO_PAT:
+        required: true
+      SMTP_USERNAME:
+        required: false
+      SMTP_PASSWORD:
+        required: false
+      ALERT_EMAIL:
+        required: false
+
+jobs:
+  cd:
+    name: "🔄 CD — Update ArgoCD Manifests"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone ArgoCD manifest repository
+        run: |
+          git clone \
+            "https://x-access-token:${{ secrets.MANIFEST_REPO_PAT }}@github.com/${{ inputs.manifest_repo }}.git" \
+            manifest-repo
+          echo "✅ Cloned: ${{ inputs.manifest_repo }}"
+
+      - name: Configure Git identity
+        run: |
+          cd manifest-repo
+          git config user.email "ci-bot@caresync.io"
+          git config user.name  "CareSync CI Bot"
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Update image tag in values.yaml
+        run: |
+          cd manifest-repo
+          VALUES_FILE="${{ inputs.manifest_values_path }}"
+          VALUES_KEY=".${{ inputs.values_key }}"
+          NEW_TAG="${{ inputs.image_tag }}"
+
+          echo "📄 Before:"
+          yq e "${VALUES_KEY}" "$VALUES_FILE"
+
+          yq e -i "${VALUES_KEY} = \"${NEW_TAG}\"" "$VALUES_FILE"
+
+          echo "📄 After:"
+          yq e "${VALUES_KEY}" "$VALUES_FILE"
+
+      - name: Commit and push manifest changes
+        run: |
+          cd manifest-repo
+          git add "${{ inputs.manifest_values_path }}"
+
+          git diff --cached --quiet && {
+            echo "ℹ️  No changes detected — tag already up to date."
+            exit 0
+          }
+
+          git commit -m "chore(deploy): update caresync-${{ inputs.service_name }} → ${{ inputs.image_tag }} [ci skip]"
+          git push origin HEAD
+          echo "✅ Manifest updated — ArgoCD will auto-sync."
+
+      - name: Deployment summary
+        run: |
+          echo "═══════════════════════════════════════════════════"
+          echo "  🎉 GitOps deployment triggered"
+          echo "  Service : caresync-${{ inputs.service_name }}"
+          echo "  Image   : ${{ inputs.full_image }}"
+          echo "  Branch  : ${{ github.ref_name }}"
+          echo "  Repo    : ${{ inputs.manifest_repo }}"
+          echo "  File    : ${{ inputs.manifest_values_path }}"
+          echo "═══════════════════════════════════════════════════"
+
+      - name: "📧 Notify — CD Failure"
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: "CareSync CI <${{ secrets.SMTP_USERNAME }}>"
+          subject: "❌ FAILED | caresync-${{ inputs.service_name }} | CD/ArgoCD | ${{ github.ref_name }}"
+          body: |
+            ❌ Pipeline FAILED at: CD — ArgoCD Manifest Update
+
+            Service : caresync-${{ inputs.service_name }}
+            Image   : ${{ inputs.full_image }}
+            Branch  : ${{ github.ref_name }}
+            Commit  : ${{ github.sha }}
+            Author  : ${{ github.actor }}
+            Run     : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -1,0 +1,44 @@
+# =============================================================================
+# CareSync — Reusable Template: Manual Approval Gate
+# Called directly by each microservice workflow  (Job 4)
+# Runs only on the 'production' branch.
+# Requires a GitHub Environment named "production" with required reviewers.
+# =============================================================================
+name: "CareSync Template — Manual Approval Gate"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      full_image:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+
+jobs:
+  approval:
+    name: "✅ Awaiting Production Approval"
+    runs-on: ubuntu-latest
+    # Only runs on the production branch — caller enforces this condition
+    environment:
+      name: production   # Must have required reviewers configured in repo settings
+
+    steps:
+      - name: Show pending deployment info
+        run: |
+          echo "═══════════════════════════════════════════════════"
+          echo "  ⏸  Awaiting approval for production deployment"
+          echo "  Service : medimesh-${{ inputs.service_name }}"
+          echo "  Image   : ${{ inputs.full_image }}"
+          echo "  Tag     : ${{ inputs.image_tag }}"
+          echo "  Branch  : ${{ github.ref_name }}"
+          echo "  Actor   : ${{ github.actor }}"
+          echo "═══════════════════════════════════════════════════"
+
+      - name: Approval confirmed
+        run: |
+          echo "🟢 Approved — proceeding with production deployment."
