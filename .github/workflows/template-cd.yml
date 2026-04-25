@@ -1,8 +1,7 @@
-# =============================================================================
-# CareSync — Reusable Template: CD — Update ArgoCD Manifest Repo
-# File    : template-cd.yml
-# Called  : directly from each microservice workflow (Job 5)
-# =============================================================================
+# caresync-org/template-ci
+# .github/workflows/template-cd.yml
+# FIX: manifest_branch is now dynamic, not hardcoded to 'dev'
+
 name: "CareSync Template — CD (ArgoCD GitOps)"
 
 on:
@@ -31,7 +30,7 @@ on:
       manifest_branch:
         required: false
         type: string
-        default: "dev"                          # 👈 ADDED
+        default: "dev"            # caller overrides this
     secrets:
       MANIFEST_REPO_PAT:
         required: true
@@ -54,7 +53,8 @@ jobs:
             --branch ${{ inputs.manifest_branch }} \
             "https://x-access-token:${{ secrets.MANIFEST_REPO_PAT }}@github.com/${{ inputs.manifest_repo }}.git" \
             manifest-repo
-          echo "✅ Cloned: ${{ inputs.manifest_repo }} (branch: ${{ inputs.manifest_branch }})"
+          echo "✅ Cloned: ${{ inputs.manifest_repo }}"
+          echo "   Branch: ${{ inputs.manifest_branch }}"
 
       - name: Configure Git identity
         run: |
@@ -76,13 +76,13 @@ jobs:
           VALUES_KEY=".${{ inputs.values_key }}"
           NEW_TAG="${{ inputs.image_tag }}"
 
-          echo "📄 Before:"
-          yq e "${VALUES_KEY}" "${VALUES_FILE}"
+          echo "📄 File   : ${VALUES_FILE}"
+          echo "📄 Key    : ${VALUES_KEY}"
+          echo "📄 Before : $(yq e "${VALUES_KEY}" "${VALUES_FILE}")"
 
           yq e -i "${VALUES_KEY} = \"${NEW_TAG}\"" "${VALUES_FILE}"
 
-          echo "📄 After:"
-          yq e "${VALUES_KEY}" "${VALUES_FILE}"
+          echo "📄 After  : $(yq e "${VALUES_KEY}" "${VALUES_FILE}")"
 
       - name: Commit and push manifest changes
         run: |
@@ -94,21 +94,25 @@ jobs:
             exit 0
           }
 
-          git commit -m "chore(deploy): update caresync-${{ inputs.service_name }} → ${{ inputs.image_tag }} [ci skip]"
-          git push origin HEAD:${{ inputs.manifest_branch }}    # 👈 FIXED
-          echo "✅ Manifest updated — ArgoCD will auto-sync."
+          git commit -m \
+            "chore(deploy): update caresync-${{ inputs.service_name }} → ${{ inputs.image_tag }} [ci skip]"
+
+          git push origin HEAD:${{ inputs.manifest_branch }}
+
+          echo "✅ Manifest updated!"
+          echo "   ArgoCD will auto-sync to cluster."
 
       - name: Deployment summary
         run: |
-          echo "═══════════════════════════════════════════════════"
+          echo "═══════════════════════════════════════════════"
           echo "  🎉 GitOps deployment triggered"
-          echo "  Service : caresync-${{ inputs.service_name }}"
-          echo "  Image   : ${{ inputs.full_image }}"
-          echo "  Branch  : ${{ github.ref_name }}"
-          echo "  Repo    : ${{ inputs.manifest_repo }}"
-          echo "  File    : ${{ inputs.manifest_values_path }}"
-          echo "  ManifestBranch : ${{ inputs.manifest_branch }}"
-          echo "═══════════════════════════════════════════════════"
+          echo "  Service        : caresync-${{ inputs.service_name }}"
+          echo "  Image          : ${{ inputs.full_image }}"
+          echo "  Source Branch  : ${{ github.ref_name }}"
+          echo "  Manifest Repo  : ${{ inputs.manifest_repo }}"
+          echo "  Manifest Branch: ${{ inputs.manifest_branch }}"
+          echo "  File           : ${{ inputs.manifest_values_path }}"
+          echo "═══════════════════════════════════════════════"
 
       - name: "📧 Notify — CD Failure"
         if: failure()
@@ -121,7 +125,7 @@ jobs:
           password: ${{ secrets.SMTP_PASSWORD }}
           to: ${{ secrets.ALERT_EMAIL }}
           from: "CareSync CI <${{ secrets.SMTP_USERNAME }}>"
-          subject: "❌ FAILED | caresync-${{ inputs.service_name }} | CD/ArgoCD | ${{ github.ref_name }}"
+          subject: "❌ FAILED | caresync-${{ inputs.service_name }} | CD | ${{ github.ref_name }}"
           body: |
             ❌ Pipeline FAILED at: CD — ArgoCD Manifest Update
 
