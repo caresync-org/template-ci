@@ -1,0 +1,98 @@
+name: Template - SonarQube SAST
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      working_directory:
+        required: false
+        type: string
+        default: '.'
+    secrets:
+      SONARQUBE_TOKEN:
+        required: true
+      SONARQUBE_URL:
+        required: true
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      ALERT_EMAIL:
+        required: true
+
+jobs:
+  sonarqube:
+    name: SonarQube SAST Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci || {
+              echo "npm ci failed - lock file out of sync, running npm install"
+              npm install
+            }
+          else
+            npm install
+          fi
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@master
+        with:
+          projectBaseDir: ${{ inputs.working_directory }}
+          args: >
+            -Dsonar.projectKey=${{ inputs.service_name }}
+            -Dsonar.projectName=${{ inputs.service_name }}
+            -Dsonar.sources=src
+            -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/build/**,**/*.test.js,**/*.spec.js
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONARQUBE_URL }}
+
+      - name: SonarQube Quality Gate Check
+        uses: SonarSource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONARQUBE_URL }}
+
+      - name: Send Failure Email - SonarQube
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "FAILED - SonarQube Scan - ${{ inputs.service_name }}"
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: CareSync DevOps <${{ secrets.SMTP_USERNAME }}>
+          body: |
+            SonarQube SAST Scan FAILED
+
+            Service:    ${{ inputs.service_name }}
+            Branch:     ${{ github.ref_name }}
+            Commit:     ${{ github.sha }}
+            Triggered:  ${{ github.actor }}
+            Workflow:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Action Required:
+            - Check SonarQube dashboard: ${{ secrets.SONARQUBE_URL }}
+            - Fix code quality issues
+            - Push fix to ${{ github.ref_name }} branch
+
+            -- CareSync DevOps Pipeline
