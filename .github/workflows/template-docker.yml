@@ -1,0 +1,171 @@
+name: Template - Docker Build, Trivy Scan, Push
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      image_name:
+        required: true
+        type: string
+      working_directory:
+        required: false
+        type: string
+        default: '.'
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      ALERT_EMAIL:
+        required: true
+    outputs:
+      image_version:
+        description: "Semantic version tag of the built image"
+        value: ${{ jobs.docker.outputs.image_version }}
+      image_full_tag:
+        description: "Full image tag with SHA"
+        value: ${{ jobs.docker.outputs.image_full_tag }}
+
+jobs:
+  docker:
+    name: Docker Build + Trivy + Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      security-events: write
+    outputs:
+      image_version: ${{ steps.versioning.outputs.new_tag }}
+      image_full_tag: ${{ steps.versioning.outputs.new_tag }}-${{ github.sha }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate Semantic Version
+        id: versioning
+        uses: mathieudutour/github-tag-action@v6.1
+        with:
+          github_token: ${{ github.token }}
+          tag_prefix: "v"
+          default_bump: patch
+          release_branches: production
+          pre_release_branches: dev
+          dry_run: false
+
+      - name: Set Image Tags
+        id: tags
+        run: |
+          VERSION="${{ steps.versioning.outputs.new_tag }}"
+          SHA="${{ github.sha }}"
+          SHORT_SHA="${SHA:0:7}"
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.image_name }}"
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "tag_version=${IMAGE}:${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag_sha=${IMAGE}:${VERSION}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "tag_latest=${IMAGE}:latest" >> $GITHUB_OUTPUT
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Image Tags That Will Be Built:"
+          echo "  ${IMAGE}:${VERSION}"
+          echo "  ${IMAGE}:${VERSION}-${SHORT_SHA}"
+          echo "  ${IMAGE}:latest"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker Image (Local for Trivy Scan)
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.working_directory }}
+          push: false
+          load: true
+          tags: ${{ steps.tags.outputs.tag_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
+        with:
+          image-ref: ${{ steps.tags.outputs.tag_version }}
+          format: 'table'
+          output: 'trivy-image-report.txt'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Trivy Filesystem Scan
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
+        with:
+          scan-type: 'fs'
+          scan-ref: ${{ inputs.working_directory }}
+          format: 'table'
+          output: 'trivy-fs-report.txt'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-reports-${{ inputs.service_name }}-${{ github.run_number }}
+          path: |
+            trivy-image-report.txt
+            trivy-fs-report.txt
+          retention-days: 30
+
+      - name: Push All Image Tags to DockerHub
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.working_directory }}
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.tag_version }}
+            ${{ steps.tags.outputs.tag_sha }}
+            ${{ steps.tags.outputs.tag_latest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Send Failure Email - Docker
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "FAILED - Docker Build/Push - ${{ inputs.service_name }}"
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: CareSync DevOps <${{ secrets.SMTP_USERNAME }}>
+          body: |
+            Docker Build/Push FAILED
+
+            Service:    ${{ inputs.service_name }}
+            Branch:     ${{ github.ref_name }}
+            Commit:     ${{ github.sha }}
+            Triggered:  ${{ github.actor }}
+            Workflow:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Action Required:
+            - Check Dockerfile for errors
+            - Verify DockerHub credentials (nandana2002)
+            - Check Trivy scan results in artifacts
+
+            -- CareSync DevOps Pipeline
