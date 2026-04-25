@@ -1,0 +1,134 @@
+name: Template - Build and Snyk SCA
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      working_directory:
+        required: false
+        type: string
+        default: '.'
+      node_version:
+        required: false
+        type: string
+        default: '20'
+    secrets:
+      SNYK_TOKEN:
+        required: true
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      ALERT_EMAIL:
+        required: true
+
+jobs:
+  build-and-snyk:
+    name: Build + Snyk SCA Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working_directory }}/package-lock.json
+
+      - name: Install Dependencies
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci || {
+              echo "npm ci failed - lock file out of sync, running npm install"
+              npm install
+            }
+          else
+            npm install
+          fi
+
+      - name: Build Application
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          if npm run | grep -q "build"; then
+            npm run build
+          else
+            echo "No build script found - skipping build step"
+          fi
+
+      - name: Setup Snyk
+        uses: snyk/actions/setup@master
+
+      - name: Run Snyk SCA Scan
+        working-directory: ${{ inputs.working_directory }}
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk test \
+            --severity-threshold=high \
+            --json \
+            --json-file-output=snyk-results.json \
+            || true
+
+          snyk test \
+            --severity-threshold=high \
+            2>&1 | tee snyk-report.txt \
+            || true
+
+      - name: Generate Snyk HTML Report
+        working-directory: ${{ inputs.working_directory }}
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          npm install -g snyk-to-html 2>/dev/null || true
+          if [ -f snyk-results.json ]; then
+            snyk-to-html -i snyk-results.json -o snyk-report.html || true
+          fi
+
+          if [ ! -f snyk-report.html ]; then
+            echo "<html><body><h1>Snyk Report - ${{ inputs.service_name }}</h1><pre>$(cat snyk-report.txt 2>/dev/null || echo 'No report generated')</pre></body></html>" > snyk-report.html
+          fi
+
+      - name: Upload Snyk Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-report-${{ inputs.service_name }}-${{ github.run_number }}
+          path: |
+            ${{ inputs.working_directory }}/snyk-report.html
+            ${{ inputs.working_directory }}/snyk-results.json
+          retention-days: 30
+
+      - name: Send Failure Email - Build
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "FAILED - Build Stage - ${{ inputs.service_name }}"
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: CareSync DevOps <${{ secrets.SMTP_USERNAME }}>
+          body: |
+            Build Stage FAILED
+
+            Service:    ${{ inputs.service_name }}
+            Branch:     ${{ github.ref_name }}
+            Commit:     ${{ github.sha }}
+            Triggered:  ${{ github.actor }}
+            Workflow:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Action Required:
+            - Check npm install / npm build errors
+            - Fix dependency issues
+            - Push fix to ${{ github.ref_name }} branch
+
+            -- CareSync DevOps Pipeline
