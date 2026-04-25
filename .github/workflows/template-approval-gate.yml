@@ -1,0 +1,88 @@
+name: Template - Approval Gate
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      image_version:
+        required: true
+        type: string
+      target_environment:
+        required: true
+        type: string
+      target_namespace:
+        required: true
+        type: string
+    secrets:
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      ALERT_EMAIL:
+        required: true
+    outputs:
+      approved:
+        description: "Whether deployment was approved"
+        value: ${{ jobs.approval.outputs.approved }}
+
+jobs:
+  approval:
+    name: Approval Gate - ${{ inputs.target_environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target_environment }}
+    outputs:
+      approved: ${{ steps.set-approved.outputs.approved }}
+    steps:
+      - name: Send Approval Request Email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "⏳ APPROVAL REQUIRED - Deploy ${{ inputs.service_name }} to ${{ inputs.target_environment }}"
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: CareSync DevOps <${{ secrets.SMTP_USERNAME }}>
+          body: |
+            DEPLOYMENT APPROVAL REQUIRED
+            ══════════════════════════════════════
+
+            Service:      ${{ inputs.service_name }}
+            Version:      ${{ inputs.image_version }}
+            Environment:  ${{ inputs.target_environment }}
+            Namespace:    ${{ inputs.target_namespace }}
+            Branch:       ${{ github.ref_name }}
+            Triggered by: ${{ github.actor }}
+            Commit:       ${{ github.sha }}
+
+            ══════════════════════════════════════
+            APPROVE OR REJECT HERE:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            ══════════════════════════════════════
+
+            Steps to approve:
+            1. Click the link above
+            2. Find "Approval Gate - ${{ inputs.target_environment }}" job
+            3. Click "Review deployments"
+            4. Select "${{ inputs.target_environment }}"
+            5. Click "Approve and deploy"
+
+            -- CareSync DevOps Pipeline
+
+      - name: Waiting For Manual Approval
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  APPROVAL GATE ACTIVE"
+          echo "  Environment: ${{ inputs.target_environment }}"
+          echo "  Service:     ${{ inputs.service_name }}"
+          echo "  Version:     ${{ inputs.image_version }}"
+          echo "  Namespace:   ${{ inputs.target_namespace }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Waiting for manual approval via GitHub Environments..."
+
+      - name: Set Approved Output
+        id: set-approved
+        run: echo "approved=true" >> $GITHUB_OUTPUT
