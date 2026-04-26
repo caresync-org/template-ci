@@ -41,12 +41,14 @@ jobs:
         run: |
           if [ "${{ inputs.branch }}" = "production" ]; then
             echo "values_file=caresync-helm/values-prod.yaml" >> $GITHUB_OUTPUT
-            echo "environment=production" >> $GITHUB_OUTPUT
-            echo "namespace=caresync-prod" >> $GITHUB_OUTPUT
+            echo "environment=production"                      >> $GITHUB_OUTPUT
+            echo "namespace=caresync-prod"                    >> $GITHUB_OUTPUT
+            echo "ref=production"                             >> $GITHUB_OUTPUT
           else
-            echo "values_file=caresync-helm/values-dev.yaml" >> $GITHUB_OUTPUT
-            echo "environment=development" >> $GITHUB_OUTPUT
-            echo "namespace=caresync-dev" >> $GITHUB_OUTPUT
+            echo "values_file=caresync-helm/values-dev.yaml"  >> $GITHUB_OUTPUT
+            echo "environment=development"                     >> $GITHUB_OUTPUT
+            echo "namespace=caresync-dev"                     >> $GITHUB_OUTPUT
+            echo "ref=dev"                                    >> $GITHUB_OUTPUT
           fi
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "Branch:      ${{ inputs.branch }}"
@@ -55,12 +57,13 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
       # STEP 2: Checkout argoCD-manifests repo
+      # Use safe ref from step 1 — never a PR ref like "1/merge"
       - name: Checkout argoCD-manifests Repo
         uses: actions/checkout@v4
         with:
           repository: caresync-org/argoCD-manifests
           token: ${{ secrets.MANIFEST_REPO_PAT }}
-          ref: ${{ inputs.branch }}
+          ref: ${{ steps.target.outputs.ref }}    # ← "dev" or "production" only
 
       # STEP 3: Install yq
       - name: Install yq
@@ -90,24 +93,26 @@ jobs:
           echo "New tag: ${NEW_TAG}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # Update image tag for the specific service
-          yq -i ".${SERVICE_KEY}.tag = \"${NEW_TAG}\"" ${VALUES_FILE}
-
-          # Inject JWT secret from GitHub Secrets
-          yq -i ".secrets.create = true" ${VALUES_FILE}
-          yq -i ".secrets.jwtSecret = \"${JWT_SECRET}\"" ${VALUES_FILE}
+          yq -i ".${SERVICE_KEY}.tag = \"${NEW_TAG}\""      ${VALUES_FILE}
+          yq -i ".secrets.create = true"                    ${VALUES_FILE}
+          yq -i ".secrets.jwtSecret = \"${JWT_SECRET}\""   ${VALUES_FILE}
 
           echo "Tag updated:    $(yq ".${SERVICE_KEY}.tag" ${VALUES_FILE})"
-          echo "Secrets injected into ${VALUES_FILE}"
           echo "secrets.create: $(yq ".secrets.create" ${VALUES_FILE})"
 
       # STEP 5: Commit and push with retry
       - name: Commit and Push With Retry
         run: |
-          git config user.name "CareSync DevOps Bot"
+          git config user.name  "CareSync DevOps Bot"
           git config user.email "devops-bot@caresync.io"
 
           git add ${{ steps.target.outputs.values_file }}
+
+          # Skip commit if nothing changed
+          if git diff --staged --quiet; then
+            echo "⚠️ No changes detected — tag already set to ${{ inputs.image_version }}"
+            exit 0
+          fi
 
           git commit -m "deploy(${{ inputs.service_key }}): update tag to ${{ inputs.image_version }}
 
@@ -121,15 +126,15 @@ jobs:
           for i in 1 2 3 4 5; do
             echo "Push attempt ${i}..."
             if git push origin HEAD; then
-              echo "Push successful on attempt ${i}"
+              echo "✅ Push successful on attempt ${i}"
               break
             fi
             if [ $i -eq 5 ]; then
-              echo "All 5 push attempts failed"
+              echo "❌ All 5 push attempts failed"
               exit 1
             fi
             echo "Retrying in $((i * 3)) seconds..."
-            git pull --rebase origin HEAD
+            git pull --rebase origin ${{ steps.target.outputs.ref }}
             sleep $((i * 3))
           done
 
@@ -142,12 +147,13 @@ jobs:
           echo "secrets.create: $(yq ".secrets.create" ${VALUES_FILE})"
           echo "Namespace:      $(yq ".global.namespace" ${VALUES_FILE})"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Values file verified"
-          echo "ArgoCD will auto-sync and apply to cluster"
+          echo "✅ Values file verified"
+          echo "✅ ArgoCD will auto-sync and apply to cluster"
 
       # STEP 7: Failure notification
       - name: Send Failure Email - CD
         if: failure()
+        continue-on-error: true
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -155,7 +161,7 @@ jobs:
           secure: true
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "FAILED - CD Deploy - ${{ inputs.service_name }} - ${{ steps.target.outputs.environment }}"
+          subject: "❌ FAILED - CD Deploy - ${{ inputs.service_name }} - ${{ steps.target.outputs.environment }}"
           to: ${{ secrets.ALERT_EMAIL }}
           from: CareSync DevOps <${{ secrets.SMTP_USERNAME }}>
           body: |
@@ -174,3 +180,180 @@ jobs:
             - Check GitHub Org Secrets (DEV_JWT_SECRET / PROD_JWT_SECRET)
 
             -- CareSync DevOps Pipeline
+
+# name: Template - CD Update Manifests
+
+# on:
+#   workflow_call:
+#     inputs:
+#       service_name:
+#         required: true
+#         type: string
+#       service_key:
+#         required: true
+#         type: string
+#       image_version:
+#         required: true
+#         type: string
+#       branch:
+#         required: true
+#         type: string
+#     secrets:
+#       MANIFEST_REPO_PAT:
+#         required: true
+#       SMTP_USERNAME:
+#         required: true
+#       SMTP_PASSWORD:
+#         required: true
+#       ALERT_EMAIL:
+#         required: true
+#       DEV_JWT_SECRET:
+#         required: true
+#       PROD_JWT_SECRET:
+#         required: true
+
+# jobs:
+#   update-manifests:
+#     name: Update Helm Values - ${{ inputs.branch == 'production' && 'Production' || 'Development' }}
+#     runs-on: ubuntu-latest
+#     steps:
+
+#       # STEP 1: Determine target environment
+#       - name: Set Target Environment
+#         id: target
+#         run: |
+#           if [ "${{ inputs.branch }}" = "production" ]; then
+#             echo "values_file=caresync-helm/values-prod.yaml" >> $GITHUB_OUTPUT
+#             echo "environment=production" >> $GITHUB_OUTPUT
+#             echo "namespace=caresync-prod" >> $GITHUB_OUTPUT
+#           else
+#             echo "values_file=caresync-helm/values-dev.yaml" >> $GITHUB_OUTPUT
+#             echo "environment=development" >> $GITHUB_OUTPUT
+#             echo "namespace=caresync-dev" >> $GITHUB_OUTPUT
+#           fi
+#           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+#           echo "Branch:      ${{ inputs.branch }}"
+#           echo "Service:     ${{ inputs.service_name }}"
+#           echo "Version:     ${{ inputs.image_version }}"
+#           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+#       # STEP 2: Checkout argoCD-manifests repo
+#       - name: Checkout argoCD-manifests Repo
+#         uses: actions/checkout@v4
+#         with:
+#           repository: caresync-org/argoCD-manifests
+#           token: ${{ secrets.MANIFEST_REPO_PAT }}
+#           ref: ${{ inputs.branch }}
+
+#       # STEP 3: Install yq
+#       - name: Install yq
+#         run: |
+#           wget -qO /usr/local/bin/yq \
+#             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+#           chmod +x /usr/local/bin/yq
+#           yq --version
+
+#       # STEP 4: Update image tag + inject JWT secret
+#       - name: Update Helm Values - Tag and Secrets
+#         run: |
+#           VALUES_FILE="${{ steps.target.outputs.values_file }}"
+#           SERVICE_KEY="${{ inputs.service_key }}"
+#           NEW_TAG="${{ inputs.image_version }}"
+
+#           if [ "${{ inputs.branch }}" = "production" ]; then
+#             JWT_SECRET="${{ secrets.PROD_JWT_SECRET }}"
+#           else
+#             JWT_SECRET="${{ secrets.DEV_JWT_SECRET }}"
+#           fi
+
+#           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+#           echo "File:    ${VALUES_FILE}"
+#           echo "Service: ${SERVICE_KEY}"
+#           echo "Old tag: $(yq ".${SERVICE_KEY}.tag" ${VALUES_FILE})"
+#           echo "New tag: ${NEW_TAG}"
+#           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+#           # Update image tag for the specific service
+#           yq -i ".${SERVICE_KEY}.tag = \"${NEW_TAG}\"" ${VALUES_FILE}
+
+#           # Inject JWT secret from GitHub Secrets
+#           yq -i ".secrets.create = true" ${VALUES_FILE}
+#           yq -i ".secrets.jwtSecret = \"${JWT_SECRET}\"" ${VALUES_FILE}
+
+#           echo "Tag updated:    $(yq ".${SERVICE_KEY}.tag" ${VALUES_FILE})"
+#           echo "Secrets injected into ${VALUES_FILE}"
+#           echo "secrets.create: $(yq ".secrets.create" ${VALUES_FILE})"
+
+#       # STEP 5: Commit and push with retry
+#       - name: Commit and Push With Retry
+#         run: |
+#           git config user.name "CareSync DevOps Bot"
+#           git config user.email "devops-bot@caresync.io"
+
+#           git add ${{ steps.target.outputs.values_file }}
+
+#           git commit -m "deploy(${{ inputs.service_key }}): update tag to ${{ inputs.image_version }}
+
+#           Service:     ${{ inputs.service_name }}
+#           Environment: ${{ steps.target.outputs.environment }}
+#           Namespace:   ${{ steps.target.outputs.namespace }}
+#           Version:     ${{ inputs.image_version }}
+#           Branch:      ${{ inputs.branch }}
+#           Run:         ${{ github.run_id }}"
+
+#           for i in 1 2 3 4 5; do
+#             echo "Push attempt ${i}..."
+#             if git push origin HEAD; then
+#               echo "Push successful on attempt ${i}"
+#               break
+#             fi
+#             if [ $i -eq 5 ]; then
+#               echo "All 5 push attempts failed"
+#               exit 1
+#             fi
+#             echo "Retrying in $((i * 3)) seconds..."
+#             git pull --rebase origin HEAD
+#             sleep $((i * 3))
+#           done
+
+#       # STEP 6: Verify values file
+#       - name: Verify Values File
+#         run: |
+#           VALUES_FILE="${{ steps.target.outputs.values_file }}"
+#           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+#           echo "Final tag:      $(yq ".${{ inputs.service_key }}.tag" ${VALUES_FILE})"
+#           echo "secrets.create: $(yq ".secrets.create" ${VALUES_FILE})"
+#           echo "Namespace:      $(yq ".global.namespace" ${VALUES_FILE})"
+#           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+#           echo "Values file verified"
+#           echo "ArgoCD will auto-sync and apply to cluster"
+
+#       # STEP 7: Failure notification
+#       - name: Send Failure Email - CD
+#         if: failure()
+#         uses: dawidd6/action-send-mail@v3
+#         with:
+#           server_address: smtp.gmail.com
+#           server_port: 465
+#           secure: true
+#           username: ${{ secrets.SMTP_USERNAME }}
+#           password: ${{ secrets.SMTP_PASSWORD }}
+#           subject: "FAILED - CD Deploy - ${{ inputs.service_name }} - ${{ steps.target.outputs.environment }}"
+#           to: ${{ secrets.ALERT_EMAIL }}
+#           from: CareSync DevOps <${{ secrets.SMTP_USERNAME }}>
+#           body: |
+#             CD Manifest Update FAILED
+
+#             Service:     ${{ inputs.service_name }}
+#             Environment: ${{ steps.target.outputs.environment }}
+#             Version:     ${{ inputs.image_version }}
+#             Branch:      ${{ inputs.branch }}
+#             Workflow:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+#             Action Required:
+#             - Check MANIFEST_REPO_PAT token is valid
+#             - Check argoCD-manifests repo permissions
+#             - Verify yq can update the values file
+#             - Check GitHub Org Secrets (DEV_JWT_SECRET / PROD_JWT_SECRET)
+
+#             -- CareSync DevOps Pipeline
